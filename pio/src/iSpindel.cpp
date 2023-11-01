@@ -26,6 +26,11 @@ All rights reserverd by S.Lang <universam@web.de>
 #include <ESP8266WiFi.h> //https://github.com/esp8266/Arduino
 #include <FS.h>          //this needs to be first
 #include <LittleFS.h>
+#include "tinyexpr.h"
+
+#include "Sender.h"
+#include "bmp280.h"
+//#include "I2Cdev.h"
 // !DEBUG 1
 
 // definitions go here
@@ -34,29 +39,70 @@ OneWire *oneWire;
 DallasTemperature DS18B20;
 DeviceAddress tempDeviceAddress;
 Ticker flasher;
+Ticker flasher5; //TGGT Remove This
 RunningMedian samples = RunningMedian(MEDIANROUNDSMAX);
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
+
+//BMP280 Maybe shuf in a .h file
+struct bmp280_dev bmp;
+struct bmp280_config conf;
+struct bmp280_uncomp_data ucomp_data;
+double Pressure;
+
+void delay_ms(uint32_t period_ms);
+int8_t i2c_reg_write(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t length);
+int8_t i2c_reg_read(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t length);
+//BMP280
+
+//#define TEMP_CELSIUS 0
+//#define TEMP_FAHRENHEIT 1
+//#define TEMP_KELVIN 2
 
 int detectTempSensor(const uint8_t pins[]);
 bool testAccel();
 
 bool shouldSaveConfig = false;
 
-iData myData;
+//char my_token[TKIDSIZE * 2];
+//char my_name[TKIDSIZE] = "iSpindelDH[SG]";            //TGGT
+//char my_server[DNSSIZE] = "log.brewfather.net";       //TGGT
+//char my_uri[DNSSIZE] = "/ispindel?id=VizLHF6c1JOvJB"; //TGGT
+//char my_db[TKIDSIZE] = "ispindel";
+//char my_username[TKIDSIZE];
+//char my_password[TKIDSIZE];
+//char my_job[TKIDSIZE] = "ispindel";
+//char my_instance[TKIDSIZE] = "000";
+//char my_polynominal[1000] = "(1.0000E-6*(tilt^3))+(-1.3137E-4*(tilt^2))+(6.9680E-3*tilt)+(9.0704E-1)";
 
-#if API_MQTT_HASSIO
-//myData.hassio = false;
-bool hassio_changed = false;
-#endif
-bool usehttps_changed = false;
+//uint8_t my_tcomp = TEMPCOMP_ERR;
+String strTComp = "err";
+//float my_ctemp = 20.0;
+
+//String my_ssid = "noharmdone";    //TGGT
+//String my_psk = "dock-brief-odd"; //TGGT
+//uint8_t my_api = DTHTTP;          //TGGT
+//uint32_t my_sleeptime = 15 * 60;
+//uint16_t my_port = 80;
+//uint32_t my_channel;
+//float my_vfact = ADCDIVISOR;
+//int16_t my_Offset[6];
+//uint8_t my_tempscale = TEMP_CELSIUS;
+//int8_t my_OWpin = -1;
 
 uint32_t DSreqTime = 0;
 
 int16_t ax, ay, az;
-float Volt, Temperatur, Tilt, Gravity;
+float Volt, Temperatur, Tilt, Gravity, accTemp, TempAdjusted; // , corrGravity;
+
+uint8_t TComp = 6;
+float GComp;
+float CTemp;
+
+iData myData;
 
 float scaleTemperatureFromC(float t, uint8_t tempscale)
 {
+  // t must be in CELSIUS
   if (tempscale == TEMP_CELSIUS)
     return t;
   else if (tempscale == TEMP_FAHRENHEIT)
@@ -67,16 +113,43 @@ float scaleTemperatureFromC(float t, uint8_t tempscale)
     return t; // Invalid value for myData.tempscale => default to celsius
 }
 
-String tempScaleLabel(uint8_t tempscale)
+float scaleTemperatureToC(float t, uint8_t tempscale)
 {
-  if (tempscale == TEMP_CELSIUS)
+  float _t;
+  switch (tempscale)
+  {
+  case TEMP_CELSIUS:
+    _t = t;
+  case TEMP_FAHRENHEIT:
+    _t = (t - 32) / 1.8f;
+  case TEMP_KELVIN:
+    _t = t - 273.15f;
+  default:
+    _t = t; // Invalid value for my_tempscale => default to celsius
+  }
+  return _t;
+}
+
+String tempScaleLabel(void)
+{
+  if (myData.my_tempscale == TEMP_CELSIUS)
     return "C";
-  else if (tempscale == TEMP_FAHRENHEIT)
+  else if (myData.my_tempscale == TEMP_FAHRENHEIT)
     return "F";
-  else if (tempscale == TEMP_KELVIN)
+  else if (myData.my_tempscale == TEMP_KELVIN)
     return "K";
   else
     return "C"; // Invalid value for myData.tempscale => default to celsius
+}
+
+String tempCompLabel(uint8_t mtc)
+{
+  if (mtc == TEMPCOMP_NO)
+    return "No";
+  else if (mtc == TEMPCOMP_YES)
+    return "Yes";
+  else
+    return "Error"; // Invalid value
 }
 
 // callback notifying us of the need to save config
@@ -87,16 +160,15 @@ void saveConfigCallback()
 
 void applyOffset()
 {
-  if (myData.Offset[0] != UNINIT && myData.Offset[1] != UNINIT && myData.Offset[2] != UNINIT)
+  if (myData.my_Offset[0] != UNINIT && myData.my_Offset[1] != UNINIT && myData.my_Offset[2] != UNINIT)
   {
-    CONSOLELN(String("applying offsets: ") + myData.Offset[0] + ":" + myData.Offset[1] + ":" + myData.Offset[2]);
-
-    accelgyro.setXAccelOffset(myData.Offset[0]);
-    accelgyro.setYAccelOffset(myData.Offset[1]);
-    accelgyro.setZAccelOffset(myData.Offset[2]);
-    accelgyro.setXGyroOffset(myData.Offset[3]);
-    accelgyro.setYGyroOffset(myData.Offset[4]);
-    accelgyro.setZGyroOffset(myData.Offset[5]);
+    CONSOLELN(String("applying offsets: ") + myData.my_Offset[0] + ":" + myData.my_Offset[1] + ":" + myData.my_Offset[2]);
+    accelgyro.setXAccelOffset(myData.my_Offset[0]);
+    accelgyro.setYAccelOffset(myData.my_Offset[1]);
+    accelgyro.setZAccelOffset(myData.my_Offset[2]);
+    accelgyro.setXGyroOffset(myData.my_Offset[3]);
+    accelgyro.setYGyroOffset(myData.my_Offset[4]);
+    accelgyro.setZGyroOffset(myData.my_Offset[5]);
     delay(1);
 
     CONSOLELN(String("confirming offsets: ") + accelgyro.getXAccelOffset() + ":" + accelgyro.getYAccelOffset() + ":" +
@@ -145,52 +217,54 @@ bool readConfig()
         else
         {
           if (doc.containsKey("Name"))
-            strcpy(myData.name, doc["Name"]);
+            strcpy(myData.my_name, doc["Name"]);
           if (doc.containsKey("Token"))
-            strcpy(myData.token, doc["Token"]);
+            strcpy(myData.my_token, doc["Token"]);
           if (doc.containsKey("Server"))
-            strcpy(myData.server, doc["Server"]);
+            strcpy(myData.my_server, doc["Server"]);
           if (doc.containsKey("Sleep"))
-            myData.sleeptime = doc["Sleep"];
+            myData.my_sleeptime = doc["Sleep"];
           if (doc.containsKey("API"))
-            myData.api = doc["API"];
+            myData.my_api = doc["API"];
           if (doc.containsKey("Port"))
-            myData.port = doc["Port"];
+            myData.my_port = doc["Port"];
           if (doc.containsKey("Channel"))
-            myData.channel = doc["Channel"];
+            myData.my_channel = doc["Channel"];
           if (doc.containsKey("URI"))
-            strcpy(myData.uri, doc["URI"]);
+            strcpy(myData.my_uri, doc["URI"]);
+          if (doc.containsKey("DB"))
+            strcpy(myData.my_db, doc["DB"]);
           if (doc.containsKey("Username"))
-            strcpy(myData.username, doc["Username"]);
+            strcpy(myData.my_username, doc["Username"]);
           if (doc.containsKey("Password"))
-            strcpy(myData.password, doc["Password"]);
+            strcpy(myData.my_password, doc["Password"]);
           if (doc.containsKey("Job"))
-            strcpy(myData.job, doc["Job"]);
+            strcpy(myData.my_job, doc["Job"]);
           if (doc.containsKey("Instance"))
-            strcpy(myData.instance, doc["Instance"]);
+            strcpy(myData.my_instance, doc["Instance"]);
           if (doc.containsKey("Vfact"))
-            myData.vfact = doc["Vfact"];
+            myData.my_vfact = doc["Vfact"];
           if (doc.containsKey("TS"))
-            myData.tempscale = doc["TS"];
+            myData.my_tempscale = doc["TS"];
           if (doc.containsKey("OWpin"))
-            myData.OWpin = doc["OWpin"];
+            myData.my_OWpin = doc["OWpin"];
           if (doc.containsKey("SSID"))
-            myData.ssid = (const char *)doc["SSID"];
+            myData.my_ssid = (const char *)doc["SSID"];
           if (doc.containsKey("PSK"))
-            myData.psk = (const char *)doc["PSK"];
+            myData.my_psk = (const char *)doc["PSK"];
           if (doc.containsKey("POLY"))
-            strcpy(myData.polynominal, doc["POLY"]);
-#if API_MQTT_HASSIO
-          if (doc.containsKey("Hassio"))
-            myData.hassio = doc["Hassio"];
-#endif
-          if (doc.containsKey("UseHTTPS"))
-            myData.usehttps = doc["UseHTTPS"];
+            strcpy(myData.my_polynominal, doc["POLY"]);
+          if (doc.containsKey("TCOMP"))
+            myData.my_tcomp = doc["TCOMP"];
+          if (doc.containsKey("CTEMP"))
+            myData.my_ctemp = doc["CTEMP"];
+          if (doc.containsKey("TCALC"))
+            strcpy(myData.my_tempcalc, doc["TCALC"]);
           if (doc.containsKey("Offset"))
           {
-            for (size_t i = 0; i < (sizeof(myData.Offset) / sizeof(*myData.Offset)); i++)
+            for (size_t i = 0; i < (sizeof(myData.my_Offset) / sizeof(*myData.my_Offset)); i++)
             {
-              myData.Offset[i] = doc["Offset"][i];
+              myData.my_Offset[i] = doc["Offset"][i];
             }
           }
 
@@ -312,7 +386,6 @@ void postConfig()
 
 bool startConfiguration()
 {
-
   WiFiManager wifiManager;
 
   wifiManager.setConfigPortalTimeout(PORTALTIMEOUT);
@@ -320,35 +393,34 @@ bool startConfiguration()
   wifiManager.setBreakAfterConfig(true);
 
   WiFiManagerParameter api_list(HTTP_API_LIST);
-  WiFiManagerParameter custom_api("selAPI", "selAPI", String(myData.api).c_str(), 20, TYPE_HIDDEN, WFM_NO_LABEL);
+  WiFiManagerParameter custom_api("selAPI", "selAPI", String(myData.my_api).c_str(),
+                                  20, TYPE_HIDDEN, WFM_NO_LABEL);
 
-  WiFiManagerParameter custom_name("name", "iSpindel Name", htmlencode(myData.name).c_str(), TKIDSIZE);
-  WiFiManagerParameter custom_sleep("sleep", "Update Interval (s)", String(myData.sleeptime).c_str(), 6, TYPE_NUMBER);
-  WiFiManagerParameter custom_token("token", "Token/ API key", htmlencode(myData.token).c_str(), TKIDSIZE * 2);
-  WiFiManagerParameter custom_server("server", "Server Address", myData.server, DNSSIZE);
-  WiFiManagerParameter custom_port("port", "Server Port", String(myData.port).c_str(), TKIDSIZE, TYPE_NUMBER);
-  WiFiManagerParameter custom_channel("channel", "Channelnumber", String(myData.channel).c_str(), TKIDSIZE,
-                                      TYPE_NUMBER);
-  WiFiManagerParameter custom_uri("uri", "Path / URI", myData.uri, DNSSIZE);
-  WiFiManagerParameter custom_username("username", "Username", myData.username, TKIDSIZE);
-  WiFiManagerParameter custom_password("password", "Password", myData.password, DNSSIZE);
-  WiFiManagerParameter custom_job("job", "Prometheus job", myData.job, TKIDSIZE);
-  WiFiManagerParameter custom_instance("instance", "Prometheus instance", myData.instance, TKIDSIZE);
-#if API_MQTT_HASSIO
-  WiFiManagerParameter custom_hassio("hassio", "Home Assistant integration via MQTT", "checked", TKIDSIZE,
-                                     myData.hassio ? TYPE_CHECKBOX_CHECKED : TYPE_CHECKBOX);
-#endif
-  WiFiManagerParameter custom_usehttps("usehttps", "Connect to server via HTTPS", "checked", TKIDSIZE,
-                                       myData.usehttps ? TYPE_CHECKBOX_CHECKED : TYPE_CHECKBOX);
-  WiFiManagerParameter custom_vfact("vfact", "Battery conversion factor", String(myData.vfact).c_str(), 7, TYPE_NUMBER);
+  WiFiManagerParameter custom_name("name", "iSpindel Name", htmlencode(myData.my_name).c_str(),
+                                   TKIDSIZE * 2);
+  WiFiManagerParameter custom_sleep("sleep", "Update Interval (s)",
+                                    String(myData.my_sleeptime).c_str(), 6, TYPE_NUMBER);
+  WiFiManagerParameter custom_token("token", "Token", htmlencode(myData.my_token).c_str(),
+                                    TKIDSIZE * 2 * 2);
+  WiFiManagerParameter custom_server("server", "Server Address",
+                                     myData.my_server, DNSSIZE);
+  WiFiManagerParameter custom_port("port", "Server Port",
+                                   String(myData.my_port).c_str(), TKIDSIZE,
+                                   TYPE_NUMBER);
+  WiFiManagerParameter custom_channel("channel", "Channelnumber",
+                                      String(myData.my_channel).c_str(), TKIDSIZE, TYPE_NUMBER);
+  WiFiManagerParameter custom_uri("uri", "Path / URI", myData.my_uri, DNSSIZE);
+  WiFiManagerParameter custom_db("db", "InfluxDB db", myData.my_db, TKIDSIZE);
+  WiFiManagerParameter custom_username("username", "Username", myData.my_username, TKIDSIZE);
+  WiFiManagerParameter custom_password("password", "Password", myData.my_password, TKIDSIZE);
+  WiFiManagerParameter custom_job("job", "Prometheus job", myData.my_job, TKIDSIZE);
+  WiFiManagerParameter custom_instance("instance", "Prometheus instance", myData.my_instance, TKIDSIZE);
+  WiFiManagerParameter custom_vfact("vfact", "Battery conversion factor",
+                                    String(myData.my_vfact).c_str(), 7, TYPE_NUMBER);
   WiFiManagerParameter tempscale_list(HTTP_TEMPSCALE_LIST);
-  WiFiManagerParameter custom_tempscale("tempscale", "tempscale", String(myData.tempscale).c_str(), 5, TYPE_HIDDEN,
-                                        WFM_NO_LABEL);
-  WiFiManagerParameter custom_warning1(
-      "warning1",
-      "WARNING! Secure MQTT has a big impact on battery usage.<BR>&nbsp;<BR>For AWS:<UL><LI>Name must be "
-      "Thingname</LI><LI>Server must be Endpoint</LI><LI>Port must be 8883</LI><LI>Path/URI is Publish Topic</LI></UL>",
-      "<<<<< >>>>>", TKIDSIZE);
+  WiFiManagerParameter custom_tempscale("tempscale", "tempscale",
+                                        String(myData.my_tempscale).c_str(),
+                                        5, TYPE_HIDDEN, WFM_NO_LABEL);
 
   wifiManager.addParameter(&custom_name);
   wifiManager.addParameter(&custom_sleep);
@@ -381,12 +453,24 @@ bool startConfiguration()
   WiFiManagerParameter custom_polynom_lbl(
       "<hr><label for=\"POLYN\">Gravity conversion<br/>ex. \"-0.00031*tilt^2+0.557*tilt-14.054\"</label>");
   wifiManager.addParameter(&custom_polynom_lbl);
-  WiFiManagerParameter custom_polynom("POLYN", "Polynominal", htmlencode(myData.polynominal).c_str(), 250,
-                                      WFM_NO_LABEL);
+  WiFiManagerParameter custom_polynom("POLYN", "Polynominal", htmlencode(myData.my_polynominal).c_str(), sizeof(myData.my_polynominal) * 2, WFM_NO_LABEL);
   wifiManager.addParameter(&custom_polynom);
-
-  wifiManager.setConfSSID(htmlencode(myData.ssid));
-  wifiManager.setConfPSK(htmlencode(myData.psk));
+  WiFiManagerParameter custom_tempcalc_lbl("<hr><label for=\"TCALC\">Temperature Adjustment<br/>ex. \"temp\"</label>");
+  wifiManager.addParameter(&custom_tempcalc_lbl);
+  WiFiManagerParameter custom_tempcalc("TCALC", "Adjustment Calc", htmlencode(myData.my_tempcalc).c_str(), sizeof(myData.my_tempcalc) * 2, WFM_NO_LABEL);
+  wifiManager.addParameter(&custom_tempcalc);
+  WiFiManagerParameter tcomp_hint("<hr><label for=\"API\">Temperature Compensate Gravity?</label>");
+  WiFiManagerParameter tcomp_list(HTTP_TEMPCOMPENSATION_LIST);
+  WiFiManagerParameter tcomp("tempcomp", "tempcomp", String(myData.my_tcomp).c_str(),
+                             20, TYPE_HIDDEN, WFM_NO_LABEL);
+  WiFiManagerParameter ctemp("ctemp", "Base Temperature",
+                             String(myData.my_ctemp).c_str(), 7, TYPE_NUMBER);
+  wifiManager.addParameter(&tcomp_hint);
+  wifiManager.addParameter(&tcomp_list);
+  wifiManager.addParameter(&tcomp);
+  wifiManager.addParameter(&ctemp);
+  wifiManager.setConfSSID(htmlencode(myData.my_ssid));
+  wifiManager.setConfPSK(htmlencode(myData.my_psk));
 
   CONSOLELN(F("started Portal"));
   static char ssid[33] = {0}; //32 char max for SSIDs
@@ -398,43 +482,33 @@ bool startConfiguration()
     WiFi.hostname(myData.name); //Set DNS hostname
   }
 
-  wifiManager.startConfigPortal(ssid);
+  strcpy(myData.my_polynominal, custom_polynom.getValue());
+  strcpy(myData.my_tempcalc, custom_tempcalc.getValue());
+  myData.my_tcomp = String(tcomp.getValue()).toInt();
+  myData.my_ctemp = String(ctemp.getValue()).toFloat();
 
-  strcpy(myData.polynominal, custom_polynom.getValue());
+  validateInput(custom_name.getValue(), myData.my_name);
+  validateInput(custom_token.getValue(), myData.my_token);
+  validateInput(custom_server.getValue(), myData.my_server);
+  validateInput(custom_db.getValue(), myData.my_db);
+  validateInput(custom_username.getValue(), myData.my_username);
+  validateInput(custom_password.getValue(), myData.my_password);
+  validateInput(custom_job.getValue(), myData.my_job);
+  validateInput(custom_instance.getValue(), myData.my_instance);
+  myData.my_sleeptime = String(custom_sleep.getValue()).toInt();
 
-  validateInput(custom_name.getValue(), myData.name);
-  validateInput(custom_token.getValue(), myData.token);
-  validateInput(custom_server.getValue(), myData.server);
-  validateInput(custom_username.getValue(), myData.username);
-  validateInput(custom_password.getValue(), myData.password);
-  validateInput(custom_job.getValue(), myData.job);
-  validateInput(custom_instance.getValue(), myData.instance);
-  myData.sleeptime = String(custom_sleep.getValue()).toInt();
-
-  myData.api = String(custom_api.getValue()).toInt();
-  myData.port = String(custom_port.getValue()).toInt();
-  myData.channel = String(custom_channel.getValue()).toInt();
-  myData.tempscale = String(custom_tempscale.getValue()).toInt();
-#if API_MQTT_HASSIO
-  {
-    auto hassio = myData.api == DTMQTT && String(custom_hassio.getValue()) == "checked";
-    hassio_changed = myData.hassio != hassio;
-    myData.hassio = hassio;
-  }
-#endif
-  {
-    auto usehttps = myData.api == DTInfluxDB && String(custom_usehttps.getValue()) == "checked";
-    usehttps_changed = myData.usehttps != usehttps;
-    myData.usehttps = usehttps;
-  }
-  validateInput(custom_uri.getValue(), myData.uri);
+  myData.my_api = String(custom_api.getValue()).toInt();
+  myData.my_port = String(custom_port.getValue()).toInt();
+  myData.my_channel = String(custom_channel.getValue()).toInt();
+  myData.my_tempscale = String(custom_tempscale.getValue()).toInt();
+  validateInput(custom_uri.getValue(), myData.my_uri);
 
   String tmp = custom_vfact.getValue();
   tmp.trim();
   tmp.replace(',', '.');
-  myData.vfact = tmp.toFloat();
-  if (myData.vfact < ADCDIVISOR * 0.8 || myData.vfact > ADCDIVISOR * 1.25)
-    myData.vfact = ADCDIVISOR;
+  myData.my_vfact = tmp.toFloat();
+  if (myData.my_vfact < ADCDIVISOR * 0.8 || myData.my_vfact > ADCDIVISOR * 1.25)
+    myData.my_vfact = ADCDIVISOR;
 
   // save the custom parameters to FS
   if (shouldSaveConfig)
@@ -461,7 +535,7 @@ bool formatLittleFS()
 
 bool saveConfig(int16_t Offset[6])
 {
-  std::copy(Offset, Offset + 6, myData.Offset);
+  std::copy(Offset, Offset + 6, myData.my_Offset);
   CONSOLELN(String("new offsets: ") + Offset[0] + ":" + Offset[1] + ":" + Offset[2]);
   CONSOLELN(String("confirming offsets: ") + accelgyro.getXAccelOffset() + ":" + accelgyro.getYAccelOffset() + ":" +
             accelgyro.getZAccelOffset());
@@ -499,33 +573,33 @@ bool saveConfig()
 
   DynamicJsonDocument doc(2048);
 
-  doc["Name"] = myData.name;
-  doc["Token"] = myData.token;
-  doc["Sleep"] = myData.sleeptime;
+  doc["Name"] = myData.my_name;
+  doc["Token"] = myData.my_token;
+  doc["Sleep"] = myData.my_sleeptime;
   // first reboot is for test
-  myData.sleeptime = 1;
-  doc["Server"] = myData.server;
-  doc["API"] = myData.api;
-  doc["Port"] = myData.port;
-  doc["Channel"] = myData.channel;
-  doc["URI"] = myData.uri;
-  doc["Username"] = myData.username;
-  doc["Password"] = myData.password;
-  doc["Job"] = myData.job;
-  doc["Instance"] = myData.instance;
-#if API_MQTT_HASSIO
-  doc["Hassio"] = myData.hassio;
-#endif
-  doc["UseHTTPS"] = myData.usehttps;
-  doc["Vfact"] = myData.vfact;
-  doc["TS"] = myData.tempscale;
-  doc["OWpin"] = myData.OWpin;
-  doc["POLY"] = myData.polynominal;
+  myData.my_sleeptime = 1;
+  doc["Server"] = myData.my_server;
+  doc["API"] = myData.my_api;
+  doc["Port"] = myData.my_port;
+  doc["Channel"] = myData.my_channel;
+  doc["URI"] = myData.my_uri;
+  doc["DB"] = myData.my_db;
+  doc["Username"] = myData.my_username;
+  doc["Password"] = myData.my_password;
+  doc["Job"] = myData.my_job;
+  doc["Instance"] = myData.my_instance;
+  doc["Vfact"] = myData.my_vfact;
+  doc["TS"] = myData.my_tempscale;
+  doc["OWpin"] = myData.my_OWpin;
+  doc["POLY"] = myData.my_polynominal;
+  doc["TCALC"] = myData.my_tempcalc;
+  doc["TCOMP"] = myData.my_tcomp;
+  doc["CTEMP"] = myData.my_ctemp;
   doc["SSID"] = WiFi.SSID();
   doc["PSK"] = WiFi.psk();
 
   JsonArray array = doc.createNestedArray("Offset");
-  for (auto &&i : myData.Offset)
+  for (auto &&i : myData.my_Offset)
   {
     array.add(i);
   }
@@ -560,9 +634,11 @@ bool processResponse(String response)
   if (!error && doc.containsKey("interval"))
   {
     uint32_t interval = doc["interval"];
-    if (interval != myData.sleeptime && interval < 24 * 60 * 60 && interval > 10)
+    if (interval != myData.my_sleeptime &&
+        interval < 24 * 60 * 60 &&
+        interval > 10)
     {
-      myData.sleeptime = interval;
+      myData.my_sleeptime = interval;
       CONSOLE(F("Received new Interval config: "));
       CONSOLELN(interval);
       return saveConfig();
@@ -579,13 +655,13 @@ bool uploadData(uint8_t service)
   if (service == DTUbiDots)
   {
     sender.add("tilt", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     CONSOLELN(F("\ncalling Ubidots"));
-    return sender.sendUbidots(myData.token, myData.name);
+    return sender.sendUbidots(myData.my_token, myData.my_name);
   }
 #endif
 
@@ -610,14 +686,14 @@ bool uploadData(uint8_t service)
   if (service == DTMQTT)
   {
     sender.add("tilt", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
-    sender.add("temp_units", tempScaleLabel(myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
+    sender.add("temp_units", tempScaleLabel());
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     CONSOLELN(F("\ncalling MQTT"));
-    return sender.sendMQTT(myData.server, myData.port, myData.username, myData.password, myData.name);
+    return sender.sendMQTT(myData.my_server, myData.my_port, myData.my_username, myData.my_password, myData.my_name);
   }
 #endif
 
@@ -625,14 +701,14 @@ bool uploadData(uint8_t service)
   if (service == DTTHINGSPEAK)
   {
     sender.add("tilt", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
-    sender.add("temp_units", tempScaleLabel(myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
+    sender.add("temp_units", tempScaleLabel());
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     CONSOLELN(F("\ncalling ThingSpeak"));
-    return sender.sendThingSpeak(myData.token, myData.channel);
+    return sender.sendThingSpeak(myData.my_token, myData.my_channel);
   }
 #endif
 
@@ -640,16 +716,15 @@ bool uploadData(uint8_t service)
   if (service == DTInfluxDB)
   {
     sender.add("tilt", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
-    sender.add("temp_units", tempScaleLabel(myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
+    sender.add("temp_units", tempScaleLabel());
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     CONSOLELN(F("\ncalling InfluxDB"));
-
-    return sender.sendInfluxDB(myData.server, myData.port, myData.uri, myData.name, myData.username, myData.password,
-                               myData.usehttps);
+    CONSOLELN(String(F("Sending to db: ")) + myData.my_db + String(F(" w/ credentials: ")) + myData.my_username + String(F(":")) + myData.my_password);
+    return sender.sendInfluxDB(myData.my_server, myData.my_port, myData.my_db, myData.my_name, myData.my_username, myData.my_password);
   }
 #endif
 
@@ -660,10 +735,10 @@ bool uploadData(uint8_t service)
     sender.add("temperature", Temperatur);
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     CONSOLELN(F("\ncalling Prometheus Pushgateway"));
-    return sender.sendPrometheus(myData.server, myData.port, myData.job, myData.instance);
+    return sender.sendPrometheus(myData.my_server, myData.my_port, myData.my_job, myData.my_instance);
   }
 #endif
 
@@ -672,27 +747,28 @@ bool uploadData(uint8_t service)
       (service == DTHTTPS))
   {
 
-    sender.add("name", myData.name);
+    sender.add("name", myData.my_name);
     sender.add("ID", ESP.getChipId());
-    if (myData.token[0] != 0)
-      sender.add("token", myData.token);
+    if (myData.my_token[0] != 0)
+      sender.add("token", myData.my_token);
     sender.add("angle", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
-    sender.add("temp_units", tempScaleLabel(myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
+    sender.add("temp_units", tempScaleLabel());
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
-    sender.add("interval", myData.sleeptime);
+    sender.add("interval", myData.my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
+    sender.add("gravitytcomp", GComp); //TGGT Remove this
 
     if (service == DTHTTP)
     {
       CONSOLELN(F("\ncalling HTTP"));
-      return sender.sendGenericPost(myData.server, myData.uri, myData.port);
+      return sender.sendGenericPost(myData.my_server, myData.my_uri, myData.my_port);
     }
     else if (service == DTCraftBeerPi)
     {
       CONSOLELN(F("\ncalling CraftbeerPi"));
-      return sender.sendGenericPost(myData.server, CBP_ENDPOINT, 5000);
+      return sender.sendGenericPost(myData.my_server, CBP_ENDPOINT, 5000);
     }
     else if (service == DTiSPINDELde)
     {
@@ -702,7 +778,7 @@ bool uploadData(uint8_t service)
     else if (service == DTTCP)
     {
       CONSOLELN(F("\ncalling TCP"));
-      String response = sender.sendTCP(myData.server, myData.port);
+      String response = sender.sendTCP(myData.my_server, myData.my_port);
       return processResponse(response);
     }
     else if (service == DTHTTPS)
@@ -717,43 +793,43 @@ bool uploadData(uint8_t service)
   if (service == DTFHEM)
   {
     sender.add("angle", Tilt);
-    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.tempscale));
-    sender.add("temp_units", tempScaleLabel(myData.tempscale));
+    sender.add("temperature", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
+    sender.add("temp_units", tempScaleLabel());
     sender.add("battery", Volt);
     sender.add("gravity", Gravity);
     sender.add("ID", ESP.getChipId());
     CONSOLELN(F("\ncalling FHEM"));
-    return sender.sendFHEM(myData.server, myData.port, myData.name);
+    return sender.sendFHEM(myData.my_server, myData.my_port, myData.my_name);
   }
 #endif // DATABASESYSTEM ==
 #if API_TCONTROL
   if (service == DTTcontrol)
   {
-    sender.add("T", scaleTemperatureFromC(Temperatur, myData.tempscale));
+    sender.add("T", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
     sender.add("D", Tilt);
     sender.add("U", Volt);
     sender.add("G", Gravity);
     CONSOLELN(F("\ncalling TCONTROL"));
-    return sender.sendTCONTROL(myData.server, 4968);
+    return sender.sendTCONTROL(myData.my_server, 4968);
   }
 #endif // DATABASESYSTEM ==
 
 #if API_BLYNK
   if (service == DTBLYNK)
   {
-    String tempToSend = String(scaleTemperatureFromC(Temperatur, myData.tempscale), 1);
+    String tempToSend = String(scaleTemperatureFromC(Temperatur, myData.my_tempscale), 1);
     sender.add("20", tempToSend); //send temperature without the unit to the graph first
     String voltToSend = String(Volt, 2);
     sender.add("30", voltToSend); //send temperature without the unit to the graph first
 
     tempToSend += "°";
-    tempToSend += tempScaleLabel(myData.tempscale); // Add temperature unit to the String
+    tempToSend += tempScaleLabel(); // Add temperature unit to the String
 
     sender.add("1", String(Tilt, 1) + "°");
     sender.add("2", tempToSend);
     sender.add("3", voltToSend + "V");
-    sender.add("4", String(Gravity, 3));
-    return sender.sendBlynk(myData.token);
+    sender.add("4", String(Gravity, 2));
+    return sender.sendBlynk(myData.my_token);
   }
 #endif
 
@@ -761,13 +837,12 @@ bool uploadData(uint8_t service)
   if (service == DTBREWBLOX)
   {
     sender.add("Tilt[deg]", Tilt);
-    sender.add("Temperature[deg" + tempScaleLabel(myData.tempscale) + "]",
-               scaleTemperatureFromC(Temperatur, myData.tempscale));
+    sender.add("Temperature[deg" + tempScaleLabel() + "]", scaleTemperatureFromC(Temperatur, myData.my_tempscale));
     sender.add("Battery[V]", Volt);
     sender.add("Gravity", Gravity);
     sender.add("Rssi[dBm]", WiFi.RSSI());
     CONSOLELN(F("\ncalling BREWBLOX"));
-    return sender.sendBrewblox(myData.server, myData.port, myData.uri, myData.username, myData.password, myData.name);
+    return sender.sendBrewblox(myData.my_server, myData.my_port, myData.my_uri, myData.my_username, myData.my_password, myData.my_name);
   }
 #endif
 
@@ -827,8 +902,8 @@ void goodNight(uint32_t seconds)
   drd.stop();
 
   // workaround for DS not floating
-  pinMode(myData.OWpin, OUTPUT);
-  digitalWrite(myData.OWpin, LOW);
+  pinMode(myData.my_OWpin, OUTPUT);
+  digitalWrite(myData.my_OWpin, LOW);
 
   // we need another incarnation before work run
   if (_seconds > MAXSLEEPTIME)
@@ -881,27 +956,27 @@ void requestTemp()
 
 void initDS18B20()
 {
-  if (myData.OWpin == -1)
+  if (myData.my_OWpin == -1)
   {
-    myData.OWpin = detectTempSensor(OW_PINS);
-    if (myData.OWpin == -1)
+    myData.my_OWpin = detectTempSensor(OW_PINS);
+    if (myData.my_OWpin == -1)
     {
       CONSOLELN(F("ERROR: cannot find a OneWire Temperature Sensor!"));
       return;
     }
   }
-  pinMode(myData.OWpin, OUTPUT);
-  digitalWrite(myData.OWpin, LOW);
+  pinMode(myData.my_OWpin, OUTPUT);
+  digitalWrite(myData.my_OWpin, LOW);
   delay(100);
-  oneWire = new OneWire(myData.OWpin);
+  oneWire = new OneWire(myData.my_OWpin);
   DS18B20 = DallasTemperature(oneWire);
   DS18B20.begin();
 
   bool device = DS18B20.getAddress(tempDeviceAddress, 0);
   if (!device)
   {
-    myData.OWpin = detectTempSensor(OW_PINS);
-    if (myData.OWpin == -1)
+    myData.my_OWpin = detectTempSensor(OW_PINS);
+    if (myData.my_OWpin == -1)
     {
       CONSOLELN(F("ERROR: cannot find a OneWire Temperature Sensor!"));
       return;
@@ -909,7 +984,7 @@ void initDS18B20()
     else
     {
       delete oneWire;
-      oneWire = new OneWire(myData.OWpin);
+      oneWire = new OneWire(myData.my_OWpin);
       DS18B20 = DallasTemperature(oneWire);
       DS18B20.begin();
       DS18B20.getAddress(tempDeviceAddress, 0);
@@ -928,11 +1003,6 @@ bool isDS18B20ready()
 
 void initAccel()
 {
-  // join I2C bus (I2Cdev library doesn't do this automatically)
-  Wire.begin(D3, D4);
-  Wire.setClock(100000);
-  Wire.setClockStretchLimit(2 * 230);
-
   testAccel();
   // init the Accel
   accelgyro.initialize();
@@ -952,12 +1022,39 @@ void initAccel()
   applyOffset();
 }
 
+//BMP280
+void initBMP280()
+{ 
+  int8_t rslt;
+
+  bmp.delay_ms = delay_ms;            //Map delay pointer
+  bmp.dev_id = BMP280_I2C_ADDR_PRIM;  //Assign device I2C address based on the status of SDO pin (GND for PRIMARY(0x76) & VDD for SECONDARY(0x77))
+  bmp.intf = BMP280_I2C_INTF;         //Select the interface mode as I2C
+  bmp.read = i2c_reg_read;            //Map I2C read pointer
+  bmp.write = i2c_reg_write;          //Map I2C read pointer
+  rslt = bmp280_init(&bmp);
+  CONSOLELN(String(F("bmp280_init status")) + rslt);
+  //Always read the current settings before writing, especially when all the configuration is not modified
+  rslt = bmp280_get_config(&conf, &bmp);
+  CONSOLELN(String(F(" bmp280_get_config status")) + rslt);
+  
+  conf.filter = BMP280_FILTER_COEFF_2;  //Configure temperature oversampling
+  conf.os_pres = BMP280_OS_4X;          //Configure pressure oversampling
+  conf.odr = BMP280_ODR_1000_MS;        //Set output data rate
+  rslt = bmp280_set_config(&conf, &bmp);//Apply above settings
+  CONSOLELN(String(F(" bmp280_set_config status")) + rslt);
+  /* Always set the power mode after setting the configuration */
+  rslt = bmp280_set_power_mode(BMP280_NORMAL_MODE, &bmp);
+  CONSOLELN(String(F(" bmp280_set_power_mode status")) + rslt);
+}
+//BMP280
+
 float calculateTilt()
 {
-  if (ax == 0 && ay == 0 && az == 0)
-    return 0.f;
-
-  return acos(abs(az) / (sqrt(ax * ax + ay * ay + az * az))) * 180.0 / M_PI;
+  float _ax = ax;
+  float _ay = ay;
+  float _az = az;
+  return acos(_az / (sqrt(_ax * _ax + _ay * _ay + _az * _az))) * 180.0 / PI;
 }
 
 bool testAccel()
@@ -1038,8 +1135,8 @@ float getTemperature(bool block = false)
       t == 85.0)                    // we read 85 uninitialized
   {
     CONSOLELN(F("ERROR: OW DISCONNECTED"));
-    pinMode(myData.OWpin, OUTPUT);
-    digitalWrite(myData.OWpin, LOW);
+    pinMode(myData.my_OWpin, OUTPUT);
+    digitalWrite(myData.my_OWpin, LOW);
     delay(100);
     oneWire->reset();
 
@@ -1167,8 +1264,52 @@ int detectTempSensor(const uint8_t pins[])
 float getBattery()
 {
   analogRead(A0); // drop first read
-  return analogRead(A0) / myData.vfact;
+  return analogRead(A0) / myData.my_vfact;
 }
+
+//BMP280
+double getPressure()
+{
+  int8_t rslt;
+  double pres;
+  //Read the raw data from sensor
+  Serial.print("gp_predata");
+  Serial.println(rslt);
+  rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
+  Serial.print("gp_data");
+  Serial.println(rslt);
+  if (rslt != 0){
+    bmp280_soft_reset(&bmp);
+    rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
+    Serial.print("gp_data");
+    Serial.println(rslt);
+  }
+  //Gett compensated pressure as floating point value
+  rslt = bmp280_get_comp_pres_double(&pres, ucomp_data.uncomp_press, &bmp);
+  Serial.print("gp_press");
+  Serial.println(rslt);
+  //CONSOLELN(String(F("Uncompensated Pressure: ")) + ucomp_data.uncomp_temp);
+  //CONSOLELN(String(F("Compensated Pressure: ")) + temp);
+  bmp.delay_ms((uint32_t)1000); /* Sleep time between measurements = BMP280_ODR_1000_MS */
+  Serial.print("gp_delay");
+  Serial.println(rslt);
+  return pres; //Convert to Bar
+}
+
+double getPressureTemp()
+{
+  int8_t rslt;
+  double temp;
+  //Read the raw data from sensor
+  rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
+  //Gett compensated pressure as floating point value
+  rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_press, &bmp);
+  //CONSOLELN(String(F("Uncompensated Pressure: ")) + ucomp_data.uncomp_press);
+  //CONSOLELN(String(F("Compensated Pressure: ")) + pres);
+  bmp.delay_ms((uint8_t)1000); /* Sleep time between measurements = BMP280_ODR_1000_MS */
+  return temp;
+}
+//BMP280
 
 float calculateGravity()
 {
@@ -1177,7 +1318,7 @@ float calculateGravity()
   float _gravity = 0;
   int err;
   te_variable vars[] = {{"tilt", &_tilt}, {"temp", &_temp}};
-  te_expr *expr = te_compile(myData.polynominal, vars, 2, &err);
+  te_expr *expr = te_compile(myData.my_polynominal, vars, 2, &err);
 
   if (expr)
   {
@@ -1191,16 +1332,61 @@ float calculateGravity()
   return _gravity;
 }
 
+float calculateTemp(double _temp, char _poly[1000], uint8_t _tempscale)
+{
+  double _t;
+  int _err;
+  _t = scaleTemperatureToC(_temp, _tempscale);
+  te_variable vars[] = {{"temp", &_t}};
+  te_expr *expr = te_compile(_poly, vars, 2, &_err);
+
+  if (expr)
+  {
+    _t = te_eval(expr);
+    te_free(expr);
+  }
+  else
+  {
+    CONSOLELN(String(F("Temp Calc Parse error at ")) + _err);
+  }
+  return _t;
+}
+
+// funtion to compansate for temperature as per html polynomial calculator
+float tempCompGravity(float SG, float F, float CT)
+{
+  return SG * ((1.00130346 - 0.000134722124 * F + 0.00000204052596 * F * F - 0.00000000232820948 * F * F * F) / (1.00130346 - 0.000134722124 * CT + 0.00000204052596 * CT * CT - 0.00000000232820948 * CT * CT * CT));
+}
+
 void flash()
 {
   // triggers the LED
+  Serial.println("Check00");
   Volt = getBattery();
+  Serial.println("Check0");
+  Pressure = getPressure();
+  Serial.println("Check1");
   if (testAccel())
     getAccSample();
+  Serial.println("Check2");
   Tilt = calculateTilt();
   Temperatur = getTemperature(false);
   Gravity = calculateGravity();
+  accTemp = accelgyro.getTemperature() / 340.00 + (35 + (521 / 340));
+  TComp = myData.my_tcomp;
+  strTComp = tempCompLabel(myData.my_tcomp) + " : " + String(myData.my_tcomp).c_str();
+  CTemp = myData.my_ctemp;
+  GComp = tempCompGravity(Gravity, scaleTemperatureFromC(Temperatur, TEMP_FAHRENHEIT), scaleTemperatureFromC(CTemp, TEMP_FAHRENHEIT));
   requestTemp();
+  if (TComp == 7)
+  {
+    TComp = 6;
+    myData.my_tcomp = 6;
+    CONSOLELN(F("\nTGGT Formatting Spiffs"));
+    formatSpiffs();
+  };
+  TempAdjusted = calculateTemp(Temperatur, myData.my_tempcalc, myData.my_tempscale);
+  Serial.println("Check3");
 }
 
 bool isSafeMode(float _volt)
@@ -1217,11 +1403,7 @@ bool isSafeMode(float _volt)
 bool connectBackupCredentials()
 {
   WiFi.disconnect();
-  WiFi.mode(WIFI_STA); //suggestion that MQTT connection failures can happen if WIFI mode isn't STA.
-  if (strlen(myData.name) != 0)
-    WiFi.hostname(myData.name); //Set DNS hostname
-
-  WiFi.begin(myData.ssid.c_str(), myData.psk.c_str());
+  WiFi.begin(myData.my_ssid.c_str(), myData.my_psk.c_str());
   CONSOLELN(F("Rescued Wifi credentials"));
 
   CONSOLE(F("   -> waited for "));
@@ -1260,7 +1442,14 @@ void setup()
   if (!validConf)
     CONSOLELN(F("\nERROR config corrupted"));
   initDS18B20();
+    // join I2C bus (I2Cdev library doesn't do this automatically)
+  Wire.begin(D3, D4);
+  Wire.setClock(100000);
+  Wire.setClockStretchLimit(2 * 230);
   initAccel();
+  //BMP280
+  initBMP280();
+  //BMP280
 
 #ifdef WIFI_IS_OFF_AT_BOOT
   // persistence is disabled by default and WiFi does not start automatically at boot
@@ -1291,12 +1480,14 @@ void setup()
     }
 
     flasher.attach(1, flash);
+    //flasher5.attach(10, initAccel); //TGGT Remove this
 
     // rescue if wifi credentials lost because of power loss
     if (!startConfiguration())
     {
       // test if ssid exists
-      if (WiFi.SSID() == "" && myData.ssid != "" && myData.psk != "")
+      if (WiFi.SSID() == "" &&
+          myData.my_ssid != "" && myData.my_psk != "")
       {
         connectBackupCredentials();
       }
@@ -1305,6 +1496,7 @@ void setup()
     ESP.rtcUserMemoryWrite(RTCSLEEPADDR, &left2sleep, sizeof(left2sleep));
 
     flasher.detach();
+    flasher5.detach(); //TGGT Remove this
   }
   // to make sure we wake up with STA but AP
   WiFi.mode(WIFI_STA);
@@ -1317,7 +1509,7 @@ void setup()
 
   Tilt = getTilt();
 
-  float accTemp = accelgyro.getTemperature() / 340.00 + 36.53;
+  accTemp = accelgyro.getTemperature() / 340.00 + (35 + (521 / 340));
   accelgyro.setSleepEnabled(true);
 
   CONSOLE("x: ");
@@ -1344,6 +1536,38 @@ void setup()
   CONSOLE(F("Gravity: "));
   CONSOLELN(Gravity);
 
+  // optionally compensate gravity reading for measured temperature
+  TComp = myData.my_tcomp;
+  strTComp = tempCompLabel(myData.my_tcomp) + " : " + String(myData.my_tcomp).c_str();
+  CTemp = myData.my_ctemp;
+  CONSOLE(F("Compensate Gravity?: "));
+  CONSOLELN(strTComp);
+  CONSOLE(F("Base Temperature: "));
+  CONSOLELN(CTemp);
+  GComp = tempCompGravity(Gravity, scaleTemperatureFromC(Temperatur, TEMP_FAHRENHEIT), scaleTemperatureFromC(CTemp, TEMP_FAHRENHEIT));
+  CONSOLE(F("Compensated Gravity: "));
+  CONSOLELN(GComp);
+
+  // calc gravity on user defined polynominal
+  TempAdjusted = calculateTemp(Temperatur, myData.my_tempcalc, myData.my_tempscale);
+  CONSOLE(F("Adjusted Temp: "));
+  CONSOLELN(TempAdjusted);
+
+  //BMP280
+  Serial.println("CheckA");
+  Pressure = getPressure();
+  Serial.println("CheckB");
+  CONSOLE(F("Compensated Pressure: "));
+  CONSOLELN(Pressure);
+  //BM280
+
+  // water anomaly correction
+  // float _temp = Temperatur - 4; // polynominal at 4
+  // float wfact = 0.00005759 * _temp * _temp * _temp - 0.00783198 * _temp * _temp - 0.00011688 * _temp + 999.97;
+  // corrGravity = Gravity - (1 - wfact / 1000);
+  // CONSOLE(F("\tcorrGravity: "));
+  // CONSOLELN(corrGravity);
+
   if (WiFi.status() != WL_CONNECTED)
   {
     unsigned long startedAt = millis();
@@ -1365,7 +1589,7 @@ void setup()
   {
     CONSOLE(F("IP: "));
     CONSOLELN(WiFi.localIP());
-    uploadData(myData.api);
+    uploadData(myData.my_api);
   }
   else
   {
@@ -1380,13 +1604,93 @@ void setup()
   // survive - 60min sleep time
   if (isSafeMode(Volt))
   {
-    myData.sleeptime = EMERGENCYSLEEP;
+    myData.my_sleeptime = EMERGENCYSLEEP;
   }
 
-  goodNight(myData.sleeptime);
+  goodNight(myData.my_sleeptime);
 }
 
 void loop()
 {
   CONSOLELN(F("should never be here!"));
 }
+
+//BMP280 Maybe put in a .c file
+/*!
+ *  @brief Function that creates a mandatory delay required in some of the APIs such as "bmg250_soft_reset",
+ *      "bmg250_set_foc", "bmg250_perform_self_test"  and so on.
+ *
+ *  @param[in] period_ms  : the required wait time in milliseconds.
+ *  @return void.
+ *
+ */
+void delay_ms(uint32_t period_ms)
+{
+    /* Implement the delay routine according to the target machine */
+    Serial.println("Checkx");
+    Serial.println(period_ms);
+    delayMicroseconds((unsigned int)period_ms);
+    //delay((unsigned long)period_ms);
+    Serial.println("Checky");
+}
+
+/*!
+ *  @brief Function for writing the sensor's registers through I2C bus.
+ *
+ *  @param[in] i2c_addr : sensor I2C address.
+ *  @param[in] reg_addr : Register address.
+ *  @param[in] reg_data : Pointer to the data buffer whose value is to be written.
+ *  @param[in] length   : No of bytes to write.
+ *
+ *  @return Status of execution
+ *  @retval 0 -> Success
+ *  @retval >0 -> Failure Info
+ *
+ */
+int8_t i2c_reg_write(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t length)
+{
+    /* Implement the I2C write routine according to the target machine. */
+    Wire.beginTransmission(i2c_addr);
+    Wire.write(reg_addr);
+    Wire.write(*reg_data);
+    return (int8_t)Wire.endTransmission();
+}
+
+/*!
+ *  @brief Function for reading the sensor's registers through I2C bus.
+ *
+ *  @param[in] i2c_addr : Sensor I2C address.
+ *  @param[in] reg_addr : Register address.
+ *  @param[out] reg_data    : Pointer to the data buffer to store the read data.
+ *  @param[in] length   : No of bytes to read.
+ *
+ *  @return Status of execution
+ *  @retval 0 -> Success
+ *  @retval >0 -> Failure Info
+ *
+ */
+int8_t i2c_reg_read(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t length)
+{
+    /* Implement the I2C read routine according to the target machine. */
+    int i = 0;
+    uint32_t data[8]={0};
+  
+    Wire.beginTransmission(i2c_addr);
+    Wire.write(reg_addr);
+    Wire.endTransmission(); 
+    
+    Wire.requestFrom((int)i2c_addr, (int)length);    // request 6 bytes from slave device #2
+    
+    while(Wire.available())    // slave may send less than requested
+    {
+      *reg_data = (uint8_t)Wire.read();    // receive a byte as character
+      reg_data++;
+    }
+    if (*reg_data >= 0) {
+      return 0;
+    } else {
+      return 1;
+    }
+}
+
+//BMP280
