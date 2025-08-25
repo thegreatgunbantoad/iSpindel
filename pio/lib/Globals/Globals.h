@@ -114,7 +114,7 @@ extern Ticker flasher;
 // sleep management
 #define RTCSLEEPADDR 5
 #define MAXSLEEPTIME 3600UL //TODO
-#define EMERGENCYSLEEP (myData.my_sleeptime * 3 < MAXSLEEPTIME ? MAXSLEEPTIME : myData.my_sleeptime * 3)
+#define EMERGENCYSLEEP (myData.sleeptime * 3 < MAXSLEEPTIME ? MAXSLEEPTIME : myData.sleeptime * 3)
 #define LOWBATT 3.3
 
 #define UNINIT 0
@@ -145,7 +145,7 @@ extern float calibrateToVref(float);
 
 extern float scaleTemperatureFromC(float t, uint8_t tempscale);
 extern String tempScaleLabel(void);
-//extern uint8_t my_tempscale;
+//extern uint8_t tempscale;
 
 #define TEMPCOMP_NO 0
 #define TEMPCOMP_YES 1
@@ -153,30 +153,34 @@ extern String tempScaleLabel(void);
 
 struct iData
 {
-  char my_token[TKIDSIZE * 2];
-  char my_name[TKIDSIZE] = "iSpindelDH[SG]";            //TGGT
-  char my_server[DNSSIZE] = "log.brewfather.net";       //TGGT
-  char my_uri[DNSSIZE] = "/ispindel?id=VizLHF6c1JOvJB"; //TGGT
-  char my_db[TKIDSIZE] = "ispindel";
-  char my_username[TKIDSIZE];
-  char my_password[TKIDSIZE];
-  char my_job[TKIDSIZE] = "ispindel";
-  char my_instance[TKIDSIZE] = "000";
-  char my_polynominal[1000] = "(1.0000E-6*(tilt^3))+(-1.3137E-4*(tilt^2))+(6.9680E-3*tilt)+(9.0704E-1)";
-  uint8_t my_tcomp = TEMPCOMP_ERR;
+  char token[TKIDSIZE * 2];
+  char name[TKIDSIZE] = "iSpindelDH[SG]";            //TGGT
+  char server[DNSSIZE] = "log.brewfather.net";       //TGGT
+  char uri[DNSSIZE] = "/ispindel?id=VizLHF6c1JOvJB"; //TGGT
+  char db[TKIDSIZE] = "ispindel";
+  char username[TKIDSIZE];
+  char password[DNSSIZE];
+  char job[TKIDSIZE] = "ispindel";
+  char instance[TKIDSIZE] = "000";
+  char polynominal[1000] = "(1.0000E-6*(tilt^3))+(-1.3137E-4*(tilt^2))+(6.9680E-3*tilt)+(9.0704E-1)";
+  uint8_t tcomp = TEMPCOMP_ERR;
   String strTComp = "err";
-  float my_ctemp = 20.0;
-  String my_ssid = "noharmdone";    //TGGT
-  String my_psk = "dock-brief-odd"; //TGGT
-  uint8_t my_api = DTHTTP;          //TGGT
-  uint32_t my_sleeptime = 15 * 60;
-  uint16_t my_port = 80;
-  uint32_t my_channel;
-  float my_vfact = ADCDIVISOR;
-  int16_t my_Offset[6];
-  uint8_t my_tempscale = TEMP_CELSIUS;
-  int8_t my_OWpin = -1;
-  char my_tempcalc[1000] = "temp+0";
+  float ctemp = 20.0;
+  String ssid = "noharmdone";    //TGGT
+  String psk = "dock-brief-odd"; //TGGT
+  uint8_t api = DTHTTP;          //TGGT
+  uint32_t sleeptime = 15 * 60;
+  uint16_t port = 80;
+  uint32_t channel;
+  float vfact = ADCDIVISOR;
+  int16_t Offset[6];
+  uint8_t tempscale = TEMP_CELSIUS;
+  int8_t OWpin = -1;
+  char tempcalc[1000] = "temp+0";
+#if API_MQTT_HASSIO
+  bool hassio = false;
+#endif
+  bool usehttps = false;
 };
 
 extern iData myData;
