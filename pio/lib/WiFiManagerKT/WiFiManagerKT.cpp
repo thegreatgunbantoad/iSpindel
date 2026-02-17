@@ -990,6 +990,15 @@ void WiFiManager::handleiSpindel()
   page += F("<tr><td>Gravity:</td><td>");
   page += String(Gravity, 3);
   page += F("</td></tr>");
+
+  page += F("<tr><td>Active angle upperbound:</td><td>");
+  page += ActAngUpper;
+  page += F("V</td></tr>");
+
+  page += F("<tr><td>Active angle lowerbound:</td><td>");
+  page += ActAngLower;
+  page += F("V</td></tr>");
+
   page += F("</table></h2>");
   page += F("<hr><dl>");
   page += F("<dt><h3>Firmware</h3></dt>");

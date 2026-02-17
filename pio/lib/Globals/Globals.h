@@ -120,7 +120,7 @@ extern Ticker flasher;
 #define UNINIT 0
 
 extern int16_t ax, ay, az;
-extern float Volt, Temperatur, Tilt, Gravity;
+extern float Volt, Temperatur, Tilt, Gravity, ActAngUpper, ActAngLower;
 
 extern MPU6050 accelgyro;
 extern bool saveConfig();
@@ -143,6 +143,8 @@ struct iData
   char job[TKIDSIZE] = "ispindel";
   char instance[TKIDSIZE] = "000";
   char polynominal[1000] = "-0.00031*tilt^2+0.557*tilt-14.054";
+  float actangupper = 180.00;
+  float actanglower = 0.00;
   String ssid;
   String psk;
   uint8_t api;
