@@ -53,7 +53,7 @@ bool usehttps_changed = false;
 uint32_t DSreqTime = 0;
 
 int16_t ax, ay, az;
-float Volt, Temperatur, Tilt, Gravity;
+float Volt, Temperatur, Tilt, Gravity, ActAngUpper, ActAngLower;
 
 float scaleTemperatureFromC(float t, uint8_t tempscale)
 {
@@ -180,6 +180,10 @@ bool readConfig()
             myData.psk = (const char *)doc["PSK"];
           if (doc.containsKey("POLY"))
             strcpy(myData.polynominal, doc["POLY"]);
+          if (doc.containsKey("ACTANGUPPER"))
+            myData.actangupper = doc["ACTANGUPPER"];
+          if (doc.containsKey("ACTUNGLOWER"))
+            myData.actanglower = doc["ACTUNGLOWER"];
 #if API_MQTT_HASSIO
           if (doc.containsKey("Hassio"))
             myData.hassio = doc["Hassio"];
@@ -385,6 +389,11 @@ bool startConfiguration()
                                       WFM_NO_LABEL);
   wifiManager.addParameter(&custom_polynom);
 
+  WiFiManagerParameter custom_actangupper("actanglower", "Active Angle Lowerbound", String(myData.actangupper).c_str(), 7, TYPE_NUMBER);
+  wifiManager.addParameter(&custom_actangupper);
+  WiFiManagerParameter custom_actanglower("actanglower", "Active Angle Lowerbound", String(myData.actanglower).c_str(), 7, TYPE_NUMBER);
+  wifiManager.addParameter(&custom_actanglower);
+
   wifiManager.setConfSSID(htmlencode(myData.ssid));
   wifiManager.setConfPSK(htmlencode(myData.psk));
 
@@ -401,6 +410,8 @@ bool startConfiguration()
   wifiManager.startConfigPortal(ssid);
 
   strcpy(myData.polynominal, custom_polynom.getValue());
+  myData.actangupper = String(custom_actangupper.getValue()).toFloat();
+  myData.actanglower = String(custom_actanglower.getValue()).toFloat();
 
   validateInput(custom_name.getValue(), myData.name);
   validateInput(custom_token.getValue(), myData.token);
@@ -521,6 +532,8 @@ bool saveConfig()
   doc["TS"] = myData.tempscale;
   doc["OWpin"] = myData.OWpin;
   doc["POLY"] = myData.polynominal;
+  doc["ACTANGUPPER"] = myData.actangupper;
+  doc["ACTANGLOWER"] = myData.actanglower;
   doc["SSID"] = WiFi.SSID();
   doc["PSK"] = WiFi.psk();
 
@@ -1200,6 +1213,8 @@ void flash()
   Tilt = calculateTilt();
   Temperatur = getTemperature(false);
   Gravity = calculateGravity();
+  ActAngUpper = myData.actangupper;
+  ActAngLower = myData.actanglower;
   requestTemp();
 }
 
@@ -1343,6 +1358,14 @@ void setup()
   Gravity = calculateGravity();
   CONSOLE(F("Gravity: "));
   CONSOLELN(Gravity);
+
+  ActAngUpper = myData.actangupper;
+  CONSOLE(F("Active Angle Upperbound: "));
+  CONSOLELN(ActAngUpper);
+
+  ActAngLower = myData.actanglower;
+  CONSOLE(F("Active Angle Lowerbound: "));
+  CONSOLELN(ActAngLower);
 
   if (WiFi.status() != WL_CONNECTED)
   {
